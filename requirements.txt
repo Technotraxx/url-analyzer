@@ -2,6 +2,5 @@ streamlit==1.32.2
 pandas==2.2.0
 matplotlib==3.8.2
 seaborn==0.13.2
-weasyprint==60.2
 markdown==3.5
 Pillow==10.2.0
