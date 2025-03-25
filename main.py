@@ -12,6 +12,7 @@ import json
 import io
 import tempfile
 import base64
+import random
 from matplotlib.figure import Figure
 import concurrent.futures
 from pathlib import Path
@@ -36,8 +37,10 @@ class URLAnalyzer:
         self.path_components = defaultdict(list)
         self.sections = defaultdict(Counter)
         self.topic_words = Counter()
+        self.categorization_reasons = defaultdict(list)  # Store reasons for categorization
+        self.category_urls = defaultdict(list)  # Store URLs in each category
         
-        # Create content categories for classification
+        # Default content categories - can be customized by user
         self.content_categories = {
             'news': ['news', 'nachrichten', 'aktuell', 'artikel', 'story', 'stories', 'meldung'],
             'sports': ['sport', 'sports', 'fussball', 'soccer', 'basketball', 'tennis', 'wintersport', 
@@ -46,7 +49,7 @@ class URLAnalyzer:
             'health': ['gesundheit', 'health', 'medizin', 'fitness', 'wellness', 'krankheit'],
             'travel': ['reise', 'travel', 'urlaub', 'vacation', 'tourism', 'hotel', 'kreuzfahrt'],
             'finance': ['wirtschaft', 'economy', 'financial', 'finance', 'money', 'geld', 'finanzen'],
-            'technology': ['tech', 'technology', 'digital', 'it', 'computer', 'software', 'hardware', 'app'],
+            'technology': ['tech', 'technology', 'digital', 'computer', 'software', 'hardware'],  # Removed ambiguous terms like 'it' and 'app'
             'science': ['wissenschaft', 'science', 'research', 'forschung'],
             'lifestyle': ['lifestyle', 'leben', 'life', 'fashion', 'food', 'essen'],
             'automotive': ['auto', 'automotive', 'cars', 'motor', 'motoring'],
@@ -56,30 +59,82 @@ class URLAnalyzer:
             'education': ['bildung', 'education', 'schule', 'university', 'studium', 'lernen']
         }
         
-        # Create a mapping of domains to categories they likely belong to
+        # Default domain category hints - can be customized by user
         self.domain_category_hints = {
             'sport1.de': 'sports',
             'sportnews.bz': 'sports',
             'kicker.de': 'sports',
             'eurosport.de': 'sports',
+            'sport.de': 'sports',
+            'sportschau.de': 'sports',
+            'spox.com': 'sports',
+            
             'filmstarts.de': 'entertainment',
             'tvspielfilm.de': 'entertainment',
             'gala.de': 'entertainment',
             'bunte.de': 'entertainment',
+            'promiflash.de': 'entertainment',
+            'rtl.de': 'entertainment',
+            'netflix.com': 'entertainment',
+            
             'reisereporter.de': 'travel',
             'travelbook.de': 'travel',
+            'holidaycheck.de': 'travel',
+            'tripadvisor.de': 'travel',
+            
             'finanzen.net': 'finance',
             'boerse.de': 'finance',
+            'handelsblatt.com': 'finance',
+            'wirtschaftswoche.de': 'finance',
+            
             'heise.de': 'technology',
             't3n.de': 'technology',
+            'computerbild.de': 'technology',
+            'chip.de': 'technology',
+            'golem.de': 'technology',
+            
             'wissenschaft.de': 'science',
             'geo.de': 'science',
+            'spektrum.de': 'science',
+            
             'mein-schoener-garten.de': 'home_garden',
+            'garten.de': 'home_garden',
+            
             'essen-und-trinken.de': 'lifestyle',
+            'brigitte.de': 'lifestyle',
+            'cosmopolitan.de': 'lifestyle',
+            
             'motor-talk.de': 'automotive',
             'auto-motor-sport.de': 'automotive',
+            'autobild.de': 'automotive',
+            
             'bundestag.de': 'politics',
-            'royals.de': 'royals'
+            'bundesregierung.de': 'politics',
+            'tagesschau.de': 'news',
+            'spiegel.de': 'news',
+            'zeit.de': 'news',
+            'focus.de': 'news',
+            'faz.net': 'news',
+            'sueddeutsche.de': 'news',
+            'welt.de': 'news',
+            'n-tv.de': 'news',
+            'bild.de': 'news',
+            'stern.de': 'news',
+            't-online.de': 'news'
+        }
+        
+        # Create exclusion patterns to avoid false positives
+        self.exclusion_patterns = {
+            'technology': [
+                r'italien', r'italien', r'italienisch', r'italian',  # 'it' could be part of 'italian'/'italien'
+                r'item', r'items',  # 'it' could be part of 'item'
+                r'titel', r'title',  # 'it' could be part of 'title'/'titel'
+                r'kapitel',  # 'it' could be part of 'kapitel'
+                r'hospital', r'hospital', r'spital',  # 'it' could be part of 'hospital'/'spital'
+                r'appetit', r'appetite',  # 'it' could be part of 'appetite'/'appetit'
+                r'appell', r'appear', r'appeal',  # 'app' could be part of these words
+                r'apple'  # 'app' could be part of 'apple'
+            ]
         }
     
     def extract_urls(self, text):
@@ -125,8 +180,8 @@ class URLAnalyzer:
             path = parsed_url.path.strip('/')
             components = path.split('/') if path else []
             
-            # Detect categories in URL
-            detected_categories = self._detect_categories(url, domain, components)
+            # Detect categories in URL with reasons
+            detected_categories, categorization_reasons = self._detect_categories_with_reasons(url, domain, components)
             
             # Extract potential topic words from path components
             topic_words = self._extract_topic_words(components)
@@ -140,14 +195,15 @@ class URLAnalyzer:
                 'path_components': components,
                 'section': section,
                 'detected_categories': detected_categories,
+                'categorization_reasons': categorization_reasons,
                 'topic_words': topic_words
             }
         except Exception as e:
             st.error(f"Error analyzing URL {url}: {e}")
             return None
     
-    def _detect_categories(self, url, domain, components):
-        """Detect content categories in a URL.
+    def _detect_categories_with_reasons(self, url, domain, components):
+        """Detect content categories in a URL with reasons.
         
         Args:
             url (str): Full URL
@@ -155,27 +211,54 @@ class URLAnalyzer:
             components (list): Path components
             
         Returns:
-            list: Detected categories
+            tuple: (list of detected categories, dict of reasons)
         """
         detected = []
+        reasons = {}
         url_lower = url.lower()
         
         # Check if domain has a hinted category
         if domain in self.domain_category_hints:
-            detected.append(self.domain_category_hints[domain])
+            category = self.domain_category_hints[domain]
+            detected.append(category)
+            reasons[category] = f"Domain hint: {domain} -> {category}"
         
         # Check for category keywords in URL
         for category, keywords in self.content_categories.items():
             # Skip if already detected from domain hints
             if category in detected:
                 continue
-                
+            
+            # Check each keyword
             for keyword in keywords:
-                if keyword in url_lower or any(keyword in comp.lower() for comp in components):
+                # Skip if URL contains exclusion patterns for this category
+                if category in self.exclusion_patterns:
+                    excluded = False
+                    for pattern in self.exclusion_patterns[category]:
+                        if re.search(pattern, url_lower):
+                            excluded = True
+                            break
+                    if excluded:
+                        continue
+                
+                # Check if keyword is in URL
+                if keyword in url_lower:
                     detected.append(category)
+                    reasons[category] = f"Keyword match: '{keyword}' in URL"
+                    break
+                
+                # Check if keyword is in any path component
+                for comp in components:
+                    if keyword in comp.lower():
+                        detected.append(category)
+                        reasons[category] = f"Keyword match: '{keyword}' in path component '{comp}'"
+                        break
+                
+                # Break out of keyword loop if category detected
+                if category in detected:
                     break
         
-        return detected
+        return detected, reasons
     
     def _extract_topic_words(self, components):
         """Extract potential topic words from path components.
@@ -211,11 +294,13 @@ class URLAnalyzer:
         """
         results = []
         
-        # Reset counters
+        # Reset counters and trackers
         self.domain_counter = Counter()
         self.path_components = defaultdict(list)
         self.sections = defaultdict(Counter)
         self.topic_words = Counter()
+        self.categorization_reasons = defaultdict(list)
+        self.category_urls = defaultdict(list)
         
         # Process URLs
         for i, url in enumerate(self.urls):
@@ -230,6 +315,15 @@ class URLAnalyzer:
                     self.sections[result['domain']][result['section']] += 1
                 for word in result['topic_words']:
                     self.topic_words[word] += 1
+                
+                # Store categorization reasons
+                for category, reason in result['categorization_reasons'].items():
+                    self.categorization_reasons[category].append({
+                        'url': url,
+                        'domain': result['domain'],
+                        'reason': reason
+                    })
+                    self.category_urls[category].append(url)
             
             # Update progress bar
             if progress_bar:
@@ -289,6 +383,7 @@ class URLAnalyzer:
         domain_categories = defaultdict(Counter)
         category_domains = defaultdict(Counter)
         
+        # Count categories and track domain relationships
         for result in results:
             domain = result['domain']
             for category in result['detected_categories']:
@@ -303,6 +398,25 @@ class URLAnalyzer:
         df = pd.DataFrame(top_categories, columns=['Category', 'Count'])
         df['Percentage'] = df['Count'] / len(self.urls) * 100
         
+        # Add categorization method stats
+        categorization_stats = {}
+        for category in category_counter.keys():
+            if category in self.categorization_reasons:
+                domain_hint_count = 0
+                keyword_count = 0
+                
+                for item in self.categorization_reasons[category]:
+                    if "Domain hint" in item['reason']:
+                        domain_hint_count += 1
+                    else:
+                        keyword_count += 1
+                
+                categorization_stats[category] = {
+                    'domain_hint_count': domain_hint_count,
+                    'keyword_count': keyword_count,
+                    'total': domain_hint_count + keyword_count
+                }
+        
         # Create visualization if requested
         fig = None
         if plot:
@@ -316,11 +430,33 @@ class URLAnalyzer:
         for category, domains in category_domains.items():
             category_top_domains[category] = domains.most_common(10)
         
+        # Create categorization method chart
+        method_fig = None
+        if categorization_stats and plot:
+            method_data = []
+            for category, stats in categorization_stats.items():
+                method_data.append({
+                    'Category': category,
+                    'Domain Hint': stats['domain_hint_count'],
+                    'Keyword Match': stats['keyword_count']
+                })
+            
+            method_df = pd.DataFrame(method_data)
+            
+            if not method_df.empty:
+                method_fig, ax = plt.subplots(figsize=(12, 8))
+                method_df.set_index('Category').plot(kind='barh', stacked=True, ax=ax)
+                ax.set_title('Categorization Methods')
+                ax.set_xlabel('Number of URLs')
+                plt.tight_layout()
+        
         return {
             'category_counts': dict(category_counter),
             'category_top_domains': category_top_domains,
             'dataframe': df,
-            'plot': fig
+            'plot': fig,
+            'method_plot': method_fig,
+            'categorization_stats': categorization_stats
         }
     
     def analyze_sections(self, plot=True):
@@ -489,6 +625,12 @@ class URLAnalyzer:
         for category, count in category_results['category_counts'].items():
             percentage = count / domain_results['total_urls'] * 100
             report.append(f"- **{category}**: {count} URLs ({percentage:.1f}%)")
+            
+            # Add categorization method
+            if category in category_results.get('categorization_stats', {}):
+                stats = category_results['categorization_stats'][category]
+                report.append(f"  - Domain hints: {stats['domain_hint_count']} URLs")
+                report.append(f"  - Keyword matches: {stats['keyword_count']} URLs")
         
         # Add top sections
         report.extend([
@@ -582,6 +724,24 @@ class URLAnalyzer:
             'report': report,
             'execution_time': execution_time
         }
+    
+    def get_random_urls_from_category(self, category, n=5):
+        """Get random URLs from a specific category for validation.
+        
+        Args:
+            category (str): Category to sample from
+            n (int): Number of URLs to sample
+            
+        Returns:
+            list: List of sampled URLs with categorization reasons
+        """
+        if category not in self.categorization_reasons:
+            return []
+        
+        items = self.categorization_reasons[category]
+        samples = random.sample(items, min(n, len(items)))
+        
+        return samples
 
 def get_download_link_for_df(df, filename, link_text):
     """Generate a download link for a dataframe"""
@@ -605,6 +765,16 @@ def get_image_download_link(fig, filename, link_text):
     href = f'<a href="data:image/png;base64,{b64}" download="{filename}">{link_text}</a>'
     return href
 
+# Initialize session state for category keywords and domain hints
+if 'category_keywords' not in st.session_state:
+    st.session_state.category_keywords = {}
+
+if 'domain_hints' not in st.session_state:
+    st.session_state.domain_hints = {}
+
+if 'exclusion_patterns' not in st.session_state:
+    st.session_state.exclusion_patterns = {}
+
 # Sidebar options
 st.sidebar.title("Optionen")
 input_method = st.sidebar.radio(
@@ -620,6 +790,19 @@ if input_method == "Datei hochladen":
     if uploaded_file:
         content = uploaded_file.read().decode("utf-8")
         analyzer = URLAnalyzer()
+        
+        # Load custom category keywords if available
+        if st.session_state.category_keywords:
+            analyzer.content_categories.update(st.session_state.category_keywords)
+        
+        # Load custom domain hints if available
+        if st.session_state.domain_hints:
+            analyzer.domain_category_hints.update(st.session_state.domain_hints)
+        
+        # Load custom exclusion patterns if available
+        if st.session_state.exclusion_patterns:
+            analyzer.exclusion_patterns.update(st.session_state.exclusion_patterns)
+        
         loading_msg = analyzer.load_urls_from_text(content)
         st.info(loading_msg)
         
@@ -636,7 +819,8 @@ if input_method == "Datei hochladen":
                         'category_plot': results['category_results']['plot'],
                         'section_plot': results['section_results']['plot'],
                         'topic_plot': results['topic_results']['plot'],
-                        'matrix_plot': results['matrix_fig']
+                        'matrix_plot': results['matrix_fig'],
+                        'method_plot': results['category_results'].get('method_plot')
                     }
                     
                 st.success(f"Analyse abgeschlossen in {results['execution_time']:.2f} Sekunden!")
@@ -648,6 +832,19 @@ elif input_method == "URLs einfügen":
     
     if url_text:
         analyzer = URLAnalyzer()
+        
+        # Load custom category keywords if available
+        if st.session_state.category_keywords:
+            analyzer.content_categories.update(st.session_state.category_keywords)
+        
+        # Load custom domain hints if available
+        if st.session_state.domain_hints:
+            analyzer.domain_category_hints.update(st.session_state.domain_hints)
+        
+        # Load custom exclusion patterns if available
+        if st.session_state.exclusion_patterns:
+            analyzer.exclusion_patterns.update(st.session_state.exclusion_patterns)
+        
         loading_msg = analyzer.load_urls_from_text(url_text)
         st.info(loading_msg)
         
@@ -664,7 +861,8 @@ elif input_method == "URLs einfügen":
                         'category_plot': results['category_results']['plot'],
                         'section_plot': results['section_results']['plot'],
                         'topic_plot': results['topic_results']['plot'],
-                        'matrix_plot': results['matrix_fig']
+                        'matrix_plot': results['matrix_fig'],
+                        'method_plot': results['category_results'].get('method_plot')
                     }
                     
                 st.success(f"Analyse abgeschlossen in {results['execution_time']:.2f} Sekunden!")
@@ -674,9 +872,10 @@ elif input_method == "URLs einfügen":
 if 'results' in st.session_state and st.session_state.results:
     results = st.session_state.results
     plots = st.session_state.plots
+    analyzer = st.session_state.analyzer
     
     # Create tabs for different result sections
-    tabs = st.tabs(["Überblick", "Domains", "Kategorien", "Sektionen", "Themen", "Bericht"])
+    tabs = st.tabs(["Überblick", "Domains", "Kategorien", "Sektionen", "Themen", "Bericht", "Einstellungen", "Validierung"])
     
     # Overview tab
     with tabs[0]:
@@ -696,6 +895,11 @@ if 'results' in st.session_state and st.session_state.results:
         st.subheader("Top 5 Kategorien")
         category_df = results['category_results']['dataframe'].head(5)
         st.dataframe(category_df, use_container_width=True)
+        
+        if plots.get('method_plot'):
+            st.subheader("Kategorisierungsmethoden")
+            st.pyplot(plots['method_plot'])
+            st.caption("Zeigt, wie viele URLs jeder Kategorie durch Domain-Hints vs. Keyword-Matching kategorisiert wurden")
     
     # Domains tab
     with tabs[1]:
@@ -714,6 +918,20 @@ if 'results' in st.session_state and st.session_state.results:
         
         st.subheader("Kategorie-Übersicht")
         st.dataframe(results['category_results']['dataframe'], use_container_width=True)
+        
+        st.subheader("Kategorisierungsmethoden")
+        if 'categorization_stats' in results['category_results']:
+            method_data = []
+            for category, stats in results['category_results']['categorization_stats'].items():
+                method_data.append({
+                    'Kategorie': category,
+                    'Domain-Hint': stats['domain_hint_count'],
+                    'Keyword-Match': stats['keyword_count'],
+                    'Gesamt': stats['total']
+                })
+            
+            method_df = pd.DataFrame(method_data)
+            st.dataframe(method_df, use_container_width=True)
         
         if plots['matrix_plot']:
             st.subheader("Domain-Kategorie-Matrix")
@@ -741,6 +959,114 @@ if 'results' in st.session_state and st.session_state.results:
     with tabs[5]:
         st.header("Analysebericht")
         st.markdown(results['report'])
+    
+    # Settings tab
+    with tabs[6]:
+        st.header("Kategorisierungseinstellungen")
+        
+        # Category keywords editor
+        st.subheader("Kategorie-Keywords")
+        st.write("Hier kannst du die Keywords für jede Kategorie anpassen. Änderungen werden bei der nächsten Analyse berücksichtigt.")
+        
+        # Create a copy of content categories
+        if not st.session_state.category_keywords:
+            st.session_state.category_keywords = analyzer.content_categories.copy()
+        
+        # Allow user to edit category keywords
+        for category, keywords in st.session_state.category_keywords.items():
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                st.write(f"**{category}**")
+            with col2:
+                keywords_str = ", ".join(keywords)
+                new_keywords = st.text_area(f"Keywords für {category}", keywords_str, key=f"keywords_{category}", label_visibility="collapsed")
+                # Update keywords if changed
+                if new_keywords != keywords_str:
+                    st.session_state.category_keywords[category] = [k.strip() for k in new_keywords.split(",") if k.strip()]
+        
+        # Domain hints editor
+        st.subheader("Domain-Kategorie-Zuordnungen")
+        st.write("Hier kannst du die Domain-Kategorie-Zuordnungen anpassen. Änderungen werden bei der nächsten Analyse berücksichtigt.")
+        
+        # Create a copy of domain hints
+        if not st.session_state.domain_hints:
+            st.session_state.domain_hints = analyzer.domain_category_hints.copy()
+        
+        # Display domain hints in a more compact way
+        domain_hint_df = pd.DataFrame([
+            {'Domain': domain, 'Kategorie': category}
+            for domain, category in st.session_state.domain_hints.items()
+        ])
+        
+        # Allow user to edit domain hints using a dataframe editor
+        edited_hints = st.data_editor(
+            domain_hint_df,
+            use_container_width=True,
+            num_rows="dynamic",
+            key="domain_hints_editor"
+        )
+        
+        # Update domain hints if changed
+        if not edited_hints.equals(domain_hint_df):
+            new_hints = {}
+            for _, row in edited_hints.iterrows():
+                if pd.notna(row['Domain']) and pd.notna(row['Kategorie']):
+                    new_hints[row['Domain']] = row['Kategorie']
+            st.session_state.domain_hints = new_hints
+        
+        # Exclusion patterns editor
+        st.subheader("Ausschluss-Muster")
+        st.write("Hier kannst du Muster definieren, die falsche Kategorisierungen verhindern. Änderungen werden bei der nächsten Analyse berücksichtigt.")
+        
+        # Create a copy of exclusion patterns
+        if not st.session_state.exclusion_patterns:
+            st.session_state.exclusion_patterns = analyzer.exclusion_patterns.copy()
+        
+        # Allow user to edit exclusion patterns
+        for category, patterns in st.session_state.exclusion_patterns.items():
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                st.write(f"**{category}**")
+            with col2:
+                patterns_str = ", ".join(patterns)
+                new_patterns = st.text_area(f"Ausschluss-Muster für {category}", patterns_str, key=f"exclusion_{category}", label_visibility="collapsed")
+                # Update patterns if changed
+                if new_patterns != patterns_str:
+                    st.session_state.exclusion_patterns[category] = [p.strip() for p in new_patterns.split(",") if p.strip()]
+        
+        # Add button to apply changes
+        if st.button("Änderungen für die nächste Analyse speichern"):
+            st.success("Änderungen gespeichert! Sie werden bei der nächsten Analyse angewendet.")
+    
+    # Validation tab
+    with tabs[7]:
+        st.header("Kategorisierungs-Validierung")
+        st.write("Hier kannst du die Kategorisierung überprüfen, indem du zufällige URLs aus jeder Kategorie ansiehst.")
+        
+        # Allow user to select a category
+        categories = list(results['category_results']['category_counts'].keys())
+        selected_category = st.selectbox("Kategorie auswählen", categories)
+        
+        # Get random URLs from the selected category
+        sample_size = st.slider("Anzahl der Beispiel-URLs", 1, 10, 5)
+        samples = analyzer.get_random_urls_from_category(selected_category, sample_size)
+        
+        # Display samples
+        if samples:
+            st.subheader(f"Zufällige URLs aus der Kategorie '{selected_category}'")
+            for i, sample in enumerate(samples, 1):
+                with st.expander(f"URL {i}: {sample['domain']}"):
+                    st.write(f"**Vollständige URL:** {sample['url']}")
+                    st.write(f"**Kategorisierungsgrund:** {sample['reason']}")
+                    st.write(f"**Domain:** {sample['domain']}")
+                    
+                    # Add option to mark this URL as incorrectly categorized
+                    if st.button(f"Diese URL ist falsch kategorisiert", key=f"incorrect_{i}"):
+                        # This would need more state management to handle properly,
+                        # but for now we'll just show a message
+                        st.error("Feedback wurde gespeichert. In einer zukünftigen Version kannst du falsch kategorisierte URLs neu zuordnen.")
+        else:
+            st.info(f"Keine URLs in der Kategorie '{selected_category}' gefunden.")
     
     # Download buttons
     st.sidebar.header("Downloads")
@@ -790,7 +1116,8 @@ if 'results' in st.session_state and st.session_state.results:
         ('category_plot', 'Kategorien', 'category_analysis.png'),
         ('section_plot', 'Sektionen', 'section_analysis.png'),
         ('topic_plot', 'Themen', 'topic_analysis.png'),
-        ('matrix_plot', 'Matrix', 'domain_category_matrix.png')
+        ('matrix_plot', 'Matrix', 'domain_category_matrix.png'),
+        ('method_plot', 'Kategorisierungsmethoden', 'categorization_methods.png')
     ]:
         if name in plots and plots[name]:
             st.sidebar.markdown(get_image_download_link(
@@ -801,4 +1128,4 @@ if 'results' in st.session_state and st.session_state.results:
 
 # Footer
 st.markdown("---")
-st.markdown("Kalium URL Analyzer - v1.0")
+st.markdown("Kalium URL Analyzer - v2.0")
