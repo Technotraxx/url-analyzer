@@ -13,9 +13,6 @@ import io
 import tempfile
 import base64
 from matplotlib.figure import Figure
-from weasyprint import HTML, CSS
-from weasyprint.text.fonts import FontConfiguration
-import markdown
 import concurrent.futures
 from pathlib import Path
 
@@ -586,153 +583,27 @@ class URLAnalyzer:
             'execution_time': execution_time
         }
 
-def export_results_to_pdf(results, plots=None):
-    """
-    Export analysis results to a PDF file with embedded images
-    
-    Args:
-        results: The analysis results dict
-        plots: Dictionary of plots/figures to include
-        
-    Returns:
-        bytes: PDF file as bytes
-    """
-    # Convert markdown to HTML
-    md_text = results['report']
-    html_text = markdown.markdown(md_text)
-    
-    # Function to save figure to base64
-    def fig_to_base64(fig):
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight')
-        buf.seek(0)
-        return base64.b64encode(buf.read()).decode('utf-8')
-    
-    # Get base64 encoded images from plots
-    base64_images = {}
-    if plots:
-        for name, fig in plots.items():
-            if fig:
-                base64_images[name] = fig_to_base64(fig)
-    
-    # Add styling to make the PDF look better with embedded images
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>Kalium URL Analysis Report</title>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                line-height: 1.5;
-                margin: 40px;
-                font-size: 11pt;
-            }}
-            h1 {{
-                color: #2c3e50;
-                border-bottom: 2px solid #3498db;
-                padding-bottom: 10px;
-                font-size: 20pt;
-            }}
-            h2 {{
-                color: #3498db;
-                margin-top: 25px;
-                font-size: 16pt;
-            }}
-            h3 {{
-                color: #2980b9;
-                font-size: 14pt;
-            }}
-            h4 {{
-                color: #2980b9;
-                font-size: 12pt;
-            }}
-            table {{
-                border-collapse: collapse;
-                width: 100%;
-                margin: 15px 0;
-            }}
-            th, td {{
-                border: 1px solid #ddd;
-                padding: 8px;
-            }}
-            th {{
-                background-color: #f2f2f2;
-                text-align: left;
-            }}
-            img {{
-                max-width: 100%;
-                height: auto;
-                margin: 15px 0;
-                page-break-inside: avoid;
-            }}
-            .image-container {{
-                margin: 20px 0;
-                page-break-inside: avoid;
-            }}
-            .domain-item {{
-                margin-bottom: 5px;
-            }}
-            .category-item {{
-                margin-bottom: 5px;
-            }}
-            .page-break {{
-                page-break-before: always;
-            }}
-        </style>
-    </head>
-    <body>
-        {html_text}
-        
-        <div class="page-break"></div>
-        <h2>Visualisierungen</h2>
-    """
-    
-    # Add embedded images
-    plot_titles = {
-        'domain_plot': 'Top Domains',
-        'category_plot': 'Inhaltskategorien',
-        'section_plot': 'Top Sektionen/Bereiche',
-        'topic_plot': 'Häufigste Themen',
-        'matrix_plot': 'Domain-Kategorie-Matrix'
-    }
-    
-    for name, title in plot_titles.items():
-        if name in base64_images:
-            html_content += f"""
-            <div class="image-container">
-                <h3>{title}</h3>
-                <img src="data:image/png;base64,{base64_images[name]}" alt="{title}" />
-            </div>
-            """
-    
-    html_content += """
-    </body>
-    </html>
-    """
-    
-    # Create a temporary HTML file
-    with tempfile.NamedTemporaryFile(suffix='.html', delete=False) as f:
-        f.write(html_content.encode('utf-8'))
-        temp_html = f.name
-    
-    # Convert HTML to PDF
-    try:
-        pdf_buffer = io.BytesIO()
-        font_config = FontConfiguration()
-        HTML(temp_html).write_pdf(pdf_buffer, stylesheets=[], font_config=font_config)
-        pdf_buffer.seek(0)
-        
-        # Clean up temporary file
-        os.unlink(temp_html)
-        
-        return pdf_buffer.getvalue()
-    except Exception as e:
-        st.error(f"Error generating PDF: {e}")
-        # Clean up temporary file
-        os.unlink(temp_html)
-        return None
+def get_download_link_for_df(df, filename, link_text):
+    """Generate a download link for a dataframe"""
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">{link_text}</a>'
+    return href
+
+def get_download_link_for_text(text, filename, link_text):
+    """Generate a download link for text content"""
+    b64 = base64.b64encode(text.encode()).decode()
+    href = f'<a href="data:file/txt;base64,{b64}" download="{filename}">{link_text}</a>'
+    return href
+
+def get_image_download_link(fig, filename, link_text):
+    """Generate a download link for matplotlib figure"""
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    href = f'<a href="data:image/png;base64,{b64}" download="{filename}">{link_text}</a>'
+    return href
 
 # Sidebar options
 st.sidebar.title("Optionen")
@@ -874,47 +745,59 @@ if 'results' in st.session_state and st.session_state.results:
     # Download buttons
     st.sidebar.header("Downloads")
     
-    # PDF download
-    if st.sidebar.button("Report als PDF herunterladen"):
-        with st.spinner("Erstelle PDF..."):
-            pdf_bytes = export_results_to_pdf(results, plots)
-            
-            if pdf_bytes:
-                st.sidebar.download_button(
-                    label="PDF herunterladen",
-                    data=pdf_bytes,
-                    file_name="kalium_url_analysis.pdf",
-                    mime="application/pdf"
-                )
+    # Create download links for each analysis component
+    st.sidebar.markdown("### Analysedaten herunterladen")
     
-    # CSV downloads
-    if st.sidebar.button("Daten als CSV herunterladen"):
-        # Create a zip file with all CSV data
-        buffer = io.BytesIO()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Save dataframes to CSV
-            results['domain_results']['dataframe'].to_csv(f"{temp_dir}/domains.csv", index=False)
-            results['category_results']['dataframe'].to_csv(f"{temp_dir}/categories.csv", index=False)
-            results['section_results']['dataframe'].to_csv(f"{temp_dir}/sections.csv", index=False)
-            results['topic_results']['dataframe'].to_csv(f"{temp_dir}/topics.csv", index=False)
-            
-            # Save report as markdown
-            with open(f"{temp_dir}/report.md", 'w') as f:
-                f.write(results['report'])
-            
-            # Create zip file
-            import zipfile
-            with zipfile.ZipFile(buffer, 'w') as zip_file:
-                for file in os.listdir(temp_dir):
-                    zip_file.write(os.path.join(temp_dir, file), file)
-        
-        buffer.seek(0)
-        st.sidebar.download_button(
-            label="CSV-Dateien herunterladen",
-            data=buffer,
-            file_name="kalium_analysis_data.zip",
-            mime="application/zip"
-        )
+    # Domains 
+    st.sidebar.markdown(get_download_link_for_df(
+        results['domain_results']['dataframe'], 
+        "domains.csv", 
+        "📊 Domains als CSV herunterladen"
+    ), unsafe_allow_html=True)
+    
+    # Categories
+    st.sidebar.markdown(get_download_link_for_df(
+        results['category_results']['dataframe'], 
+        "categories.csv", 
+        "📊 Kategorien als CSV herunterladen"
+    ), unsafe_allow_html=True)
+    
+    # Sections
+    st.sidebar.markdown(get_download_link_for_df(
+        results['section_results']['dataframe'], 
+        "sections.csv", 
+        "📊 Sektionen als CSV herunterladen"
+    ), unsafe_allow_html=True)
+    
+    # Topics
+    st.sidebar.markdown(get_download_link_for_df(
+        results['topic_results']['dataframe'], 
+        "topics.csv", 
+        "📊 Themen als CSV herunterladen"
+    ), unsafe_allow_html=True)
+    
+    # Report text
+    st.sidebar.markdown(get_download_link_for_text(
+        results['report'], 
+        "kalium_analysis_report.md", 
+        "📝 Bericht als Markdown herunterladen"
+    ), unsafe_allow_html=True)
+    
+    # Images
+    st.sidebar.markdown("### Grafiken herunterladen")
+    for name, title, filename in [
+        ('domain_plot', 'Domains', 'domain_analysis.png'),
+        ('category_plot', 'Kategorien', 'category_analysis.png'),
+        ('section_plot', 'Sektionen', 'section_analysis.png'),
+        ('topic_plot', 'Themen', 'topic_analysis.png'),
+        ('matrix_plot', 'Matrix', 'domain_category_matrix.png')
+    ]:
+        if name in plots and plots[name]:
+            st.sidebar.markdown(get_image_download_link(
+                plots[name], 
+                filename, 
+                f"🖼️ {title}-Grafik herunterladen"
+            ), unsafe_allow_html=True)
 
 # Footer
 st.markdown("---")
